@@ -40,6 +40,7 @@ async def init_db():
                 message_id INTEGER,
                 chat_id INTEGER,
                 connection_id TEXT,
+                sender_id INTEGER,
                 sender_name TEXT,
                 username TEXT,
                 content_type TEXT,
@@ -53,10 +54,10 @@ async def init_db():
         await db.commit()
 
 # ==========================================
-# 1. РАБОЧИЙ БОТ (АНТИ-УДАЛЯТЕЛЬ ДЛЯ СОТРУДНИКОВ)
+# 1. РАБОЧИЙ БОТ
 # ==========================================
 
-# На прямые сообщения и /start бот сотрудникам полностью молчит
+# Игнорируем обычный спам в ЛС боту
 @dp_worker.message()
 async def worker_ignore_all(message: Message):
     return
@@ -80,7 +81,7 @@ async def worker_business_connection(connection: BusinessConnection):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                print(f"Ошибка отправки алерта шефу: {e}")
+                print(f"Ошибка отправки алерта: {e}")
         else:
             await db.execute("DELETE FROM accounts WHERE connection_id = ?", (conn_id,))
             try:
@@ -90,24 +91,18 @@ async def worker_business_connection(connection: BusinessConnection):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                print(f"Ошибка отправки алерта шефу: {e}")
+                print(f"Ошибка отправки алерта: {e}")
         await db.commit()
 
 @dp_worker.business_message()
 async def worker_cache_message(message: Message):
     conn_id = message.business_connection_id
-
-    # Игнорируем ответы самих сотрудников
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM accounts WHERE connection_id = ?", (conn_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and message.from_user.id == row[0]:
-                return
-
     chat_id = message.chat.id
     msg_id = message.message_id
-    sender = message.from_user.full_name
-    username = f"@{message.from_user.username}" if message.from_user.username else "без юзернейма"
+    
+    sender_id = message.from_user.id if message.from_user else 0
+    sender = message.from_user.full_name if message.from_user else "Пользователь"
+    username = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else "без юзернейма"
 
     content_type = "text"
     file_id = None
@@ -145,9 +140,9 @@ async def worker_cache_message(message: Message):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute(
             """INSERT OR REPLACE INTO messages 
-               (message_id, chat_id, connection_id, sender_name, username, content_type, text_or_caption, file_id, is_deleted, created_at) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-            (msg_id, chat_id, conn_id, sender, username, content_type, text_or_caption, file_id, timestamp)
+               (message_id, chat_id, connection_id, sender_id, sender_name, username, content_type, text_or_caption, file_id, is_deleted, created_at) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+            (msg_id, chat_id, conn_id, sender_id, sender, username, content_type, text_or_caption, file_id, timestamp)
         )
         await db.commit()
 
@@ -166,20 +161,24 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
 
         for msg_id in event.message_ids:
             async with db.execute(
-                """SELECT sender_name, username, content_type, text_or_caption, file_id 
+                """SELECT sender_id, sender_name, username, content_type, text_or_caption, file_id 
                    FROM messages WHERE message_id = ? AND chat_id = ?""",
                 (msg_id, chat_id)
             ) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    sender, username, c_type, text, file_id = row
+                    s_id, sender, username, c_type, text, file_id = row
                     await db.execute(
                         "UPDATE messages SET is_deleted = 1 WHERE message_id = ? AND chat_id = ?",
                         (msg_id, chat_id)
                     )
 
-                    # 1. Нейтральный алерт для сотрудника (без упоминания начальника)
-                    worker_text = f"🗑 <b>Удаленное сообщение от {sender}</b>"
+                    # Определяем, кто автор сообщения
+                    is_owner = (s_id == worker_user_id)
+                    author_label = "Твоё сообщение" if is_owner else sender
+
+                    # 1. Отправляем в рабочий аккаунт (владельцу профиля)
+                    worker_text = f"🗑 <b>Удалено сообщение ({author_label})</b>"
                     if worker_user_id:
                         try:
                             if c_type == "text":
@@ -201,13 +200,13 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
                             elif c_type == "document":
                                 await worker_bot.send_document(chat_id=worker_user_id, document=file_id, caption=f"{worker_text}\n{text}", parse_mode="HTML")
                         except Exception as e:
-                            print(f"Ошибка отправки сотруднику: {e}")
+                            print(f"Ошибка отправки владельцу: {e}")
 
-                    # 2. Теневой дубль начальнику в пульт
+                    # 2. Теневой дубль в админ-пульт
                     admin_header = (
                         f"🗑 <b>УДАЛЕНО СООБЩЕНИЕ</b>\n"
                         f"💼 <b>Аккаунт:</b> {acc_name}\n"
-                        f"👤 <b>Клиент:</b> {sender} ({username})"
+                        f"👤 <b>Автор:</b> {author_label} ({username})"
                     )
                     try:
                         if c_type == "text":
@@ -229,12 +228,12 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
                         elif c_type == "document":
                             await admin_bot.send_document(chat_id=MY_ADMIN_ID, document=file_id, caption=f"{admin_header}\n{text}", parse_mode="HTML")
                     except Exception as e:
-                        print(f"Ошибка отправки админу: {e}")
+                        print(f"Ошибка отправки шефу: {e}")
 
         await db.commit()
 
 # ==========================================
-# 2. АДМИН-БОТ (ПУЛЬТ РУКОВОДИТЕЛЯ)
+# 2. АДМИН-БОТ (ПУЛЬТ)
 # ==========================================
 
 @dp_admin.message(CommandStart())
@@ -404,7 +403,7 @@ HTML_TEMPLATE = """
 
                 let msgs = client.messages.map(m => `
                     <div class="msg ${m.is_deleted ? 'is-del' : ''}">
-                        ${m.is_deleted ? '<span class="badge-del">Удалено клиентом</span>' : ''}
+                        ${m.is_deleted ? '<span class="badge-del">Удалено</span>' : ''}
                         <div>${m.text}</div>
                         <div class="time">${m.time}</div>
                     </div>
