@@ -1,5 +1,7 @@
 import asyncio
+import os
 import aiosqlite
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message, BusinessMessagesDeleted
 
@@ -26,7 +28,6 @@ async def init_db():
         """)
         await db.commit()
 
-# Кэшируем входящие сообщения из бизнес-диалогов
 @dp.business_message()
 async def cache_message(message: Message):
     if message.from_user.id == MY_USER_ID:
@@ -77,7 +78,6 @@ async def cache_message(message: Message):
         )
         await db.commit()
 
-# Обрабатываем удаление
 @dp.deleted_business_messages()
 async def process_deleted(event: BusinessMessagesDeleted):
     chat_id = event.chat.id
@@ -122,9 +122,19 @@ async def process_deleted(event: BusinessMessagesDeleted):
                     await db.execute("DELETE FROM messages WHERE message_id = ? AND chat_id = ?", (msg_id, chat_id))
         await db.commit()
 
+async def dummy_web_server():
+    app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
 async def main():
     await init_db()
-    print("Бот запущен!")
+    await dummy_web_server()
+    print("Бот запущен и веб-сервер слушает порт!")
     await dp.start_polling(
         bot, 
         allowed_updates=["business_message", "deleted_business_messages", "business_connection"]
